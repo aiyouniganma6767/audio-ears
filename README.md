@@ -8,7 +8,7 @@ self-test that proves the ruler is not bent. No librosa, no PyTorch, no model do
 **numpy + ffmpeg only**, so it runs on a phone.
 
 ```bash
-python3 scripts/selftest.py                    # 24 checks against synthetic ground truth
+python3 scripts/selftest.py                    # 25 checks against synthetic ground truth
 python3 scripts/analyze.py song.mp3 out/       # -> out/song-声学分析报告.md (+ spectrogram)
 python3 scripts/analyze.py song.mp3 out/ --json # -> JSON on stdout (+ the same .md)
 ```
@@ -43,7 +43,9 @@ echo/tail repeats are de-duplicated with a deliberately narrow window.
 - **Simultaneous voices** (model, up to 3): other fundamentals still ringing inside the same
   analysis window — including the tail of the previous strike, so it is *not* a chord transcription.
   Candidates must be integer-supported by at least two spectral peaks and form a common interval
-  (±25 cents) with the main note; octave/harmonic and inharmonic-partial candidates are filtered out.
+  (±25 cents) with the main note; octave/harmonic and inharmonic-partial candidates are filtered out,
+  and anything more than 14 dB below the main note is treated as a tail / reverb and dropped.
+  JSON entries carry `rel_db` so you can see how loud each voice was.
 - **Masking hints**: weak partials sitting inside the critical band of a stronger one.
 - **Spectrogram**: matplotlib if available, else `ffmpeg showspectrumpic`, else skipped.
 - **JSON** (`--json`): every number above in a stable structure (`basic`, `events`, `timeline`,
@@ -87,6 +89,7 @@ used to mix and critique dozens of synthesized tracks.
 | all-silent file | nothing to report | 0 events, no key/tempo/brightness |
 | two different notes 0.4 s apart | no echo removal | both kept |
 | `--no-spectrogram` | no PNG | PNG path null, Markdown still written |
+| previous strike's tail in the window | 1 voice | tail not reported as a voice |
 
 These tests were written *after* the failures they now cover: an earlier build read a clean
 330.1 Hz E4 as 325.9 Hz (**−20 cents**, i.e. exactly a wolf fifth — the worst possible wrong
@@ -146,7 +149,7 @@ For Claude-style skill bundles, the same directory works as a skill folder.
 这不是一个 MIR 库，是一个带误差棒的听诊器。
 
 - 跑分析：`python3 scripts/analyze.py <音频> [输出目录]`（加 `--json` 出结构化结果）
-- 自测：`python3 scripts/selftest.py`（24 项，全部用合成信号的真值验证）
+- 自测：`python3 scripts/selftest.py`（25 项，全部用合成信号的真值验证）
 - 边界：主音高取「最响的峰」；并行音最多猜 3 个、可能漏；真实混响素材系统性偏高约 +1.5 音分；
   结构分段是声学变化点，不是曲式。
 

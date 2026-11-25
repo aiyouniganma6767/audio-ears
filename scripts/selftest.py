@@ -314,6 +314,21 @@ def test_cli_help_version(tmp):
     return v.stdout.strip()
 
 
+def test_tail_not_a_voice(tmp):
+    """先敲 E4、2.5 秒后再敲 A3：A3 的窗口里 E4 只剩余音，不该报成并行声部。"""
+    x = mix(6.0, [(0.6, struck(329.63, dur=2.2, partials=BELL_PARTS)),
+                  (3.1, struck(220.0, dur=2.2, partials=BELL_PARTS))])
+    w = os.path.join(tmp, "tailvoice.wav")
+    write_wav(w, x)
+    d = run_json(w, tmp)
+    assert len(d["events"]) == 2, f"事件数 {len(d['events'])} != 2"
+    names = [e["name"] for e in d["events"]]
+    assert names == ["E4", "A3"], f"音名 {names}"
+    for e in d["events"]:
+        assert len(e["voices"]) == 1, f"{e['t']}s 误报并行音：{e['voices']}"
+    return "E4 余音在 A3 窗口里 → 只报 1 个声部"
+
+
 def test_json_output(tmp):
     """--json：合法 JSON，字段齐、和 Markdown 对得上。"""
     w = os.path.join(tmp, "json330.wav")
@@ -453,6 +468,7 @@ CASES = [
     ("速度·节拍器", test_tempo_clicks),
     ("速度·长音连奏", test_tempo_legato),
     ("CLI help/version", test_cli_help_version),
+    ("余音不算并行音", test_tail_not_a_voice),
     ("JSON 输出", test_json_output),
     ("并行音·三音和弦", test_chord_polyphony),
     ("并行音·单音不误报", test_single_voice_no_false_polyphony),

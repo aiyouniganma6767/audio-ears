@@ -48,7 +48,7 @@ import wave
 
 import numpy as np
 
-VERSION = "1.2.1"
+VERSION = "1.3.0"
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 SR_TARGET = 32000
 
@@ -175,11 +175,12 @@ def _interval_ok(f, g, tol_cents=25.0):
 
 
 def voices_at(seg, sr, max_voices=3):
-    """估这一段里有哪几个并行的基频（单声部时只有一个）。
+    """估这一段里有哪几个并行的基频（单声部时只有一个），返回 [{"f0", "amp"}, ...]。
 
     做法：取谱峰，把 55–1200 Hz 的峰逐个当作候选基频；候选要至少被 2 个峰
     当作整数倍支持（1.5% 容差）；已经选中的基频的整数倍（八度/泛音）直接扔掉，
-    免得把钟的第二个分音报成第二个声部。最多 max_voices 个，按响度排序。
+    免得把钟的第二个分音报成第二个声部；非整数倍分音用「子谐波上有强峰」和
+    「和主音是否构成常见音程」两条一起挡。最多 max_voices 个，按响度排序。
     """
     peaks = spectrum_peaks(seg, sr, max_peaks=24, floor=0.02)
     if not peaks:
@@ -201,13 +202,13 @@ def voices_at(seg, sr, max_voices=3):
             cands.append((f, a, support))
     cands.sort(key=lambda c: -c[1])
     strong = [(g, aa) for g, aa in peaks if aa > 0.10 * amax]
-    chosen = []
+    chosen = []  # [(f, amp)]
     for f, a, _support in cands:
         if a < 0.10 * amax:
             break
-        if any(abs(1200.0 * np.log2(f / g)) < 60.0 for g in chosen):
+        if any(abs(1200.0 * np.log2(f / g)) < 60.0 for g, _ga in chosen):
             continue  # 同音
-        if any(abs(f / g - round(f / g)) <= 0.015 and round(f / g) >= 2 for g in chosen):
+        if any(abs(f / g - round(f / g)) <= 0.015 and round(f / g) >= 2 for g, _ga in chosen):
             continue  # 是已选基频的泛音
         # 上泛音判据：如果 f/k（k=2..4）附近有强峰，说明 f 更像某个低音的泛音。
         # 非整数倍分音（钟的 2.76/4.07/…）的子谐波和真分音对不齐，所以这条能把它挡掉。
@@ -215,12 +216,12 @@ def voices_at(seg, sr, max_voices=3):
             continue
         # 音程判据：只报和已选基频构成常见音程（±25 音分内的大二度到六度）的声部。
         # 钟的 2.76/4.07 分音和基频差 557/2440 音分，落不到半音格上，正好被挡掉。
-        if chosen and not any(_interval_ok(f, g) for g in chosen):
+        if chosen and not any(_interval_ok(f, g) for g, _ga in chosen):
             continue
-        chosen.append(f)
+        chosen.append((f, a))
         if len(chosen) >= max_voices:
             break
-    return chosen
+    return [{"f0": f, "amp": a} for f, a in chosen]
 
 
 def note_of(f):
@@ -509,12 +510,23 @@ def analyze(path, outdir=None, want_spectrogram=True):
         name, cents = note_of(f0)
         lv = 20 * np.log10(np.sqrt(np.mean(seg**2)) + 1e-12)
         voices = voices_at(seg, sr)
-        if not any(abs(1200 * np.log2(f0 / f)) < 50 for f in voices):
-            voices = [f0] + [f for f in voices if f < 0.9 * f0 or f > 1.1 * f0]
+        # 主音的谱峰幅度当基准；比它低 14 dB 以上的声部多半是上一击的余音/混响尾巴，不报。
+        amain = None
+        for f, a in pk:
+            if abs(1200 * np.log2(max(f0, 1e-9) / max(f, 1e-9))) < 35:
+                amain = a
+                break
+        if amain is None:
+            amain = pk[0][1]
+        voices = [v for v in voices if v["amp"] >= 0.2 * amain]
+        if not any(abs(1200 * np.log2(f0 / v["f0"])) < 50 for v in voices):
+            voices = [{"f0": f0, "amp": amain}] + voices
         voice_info = []
-        for f in voices[:3]:
-            n, c = note_of(f)
-            voice_info.append({"f0_hz": round(float(f), 2), "note": n, "cents": round(float(c), 1)})
+        for v in voices[:3]:
+            n, c = note_of(v["f0"])
+            voice_info.append({"f0_hz": round(float(v["f0"]), 2), "note": n,
+                               "cents": round(float(c), 1),
+                               "rel_db": round(20 * np.log10(max(v["amp"], 1e-12) / max(amain, 1e-12)), 1)})
         events.append(dict(
             t=round(float(t), 3), f0=float(f0), name=name, cents=float(cents), level=float(lv),
             rough=roughness(pk),

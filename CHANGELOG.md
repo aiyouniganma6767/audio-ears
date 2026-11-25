@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.0 — 2026-11-26
+
+- **Voices are amplitude-filtered**: a candidate quieter than 14 dB below the main note is
+  treated as a previous strike's tail / reverb and not reported as a parallel voice.
+  JSON voice entries now carry `rel_db`; result on real material: 安心-v2 29 → 19,
+  鲸屿集-白天 86 → 65, 碑-v2 34 → 24 reported parallel voices, chords unaffected.
+- Self-test: new "tail is not a voice" case (25 total).
+
 ## 1.2.1 — 2026-11-26
 
 - Report wording: "parallel voices" is described as *other fundamentals still ringing inside the
