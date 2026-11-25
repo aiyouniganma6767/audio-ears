@@ -1,7 +1,7 @@
 {
   "tool": "audio-ears",
-  "version": "1.1.0",
-  "file": "/tmp/demo2/audio-ears-demo.wav",
+  "version": "1.2.0",
+  "file": "/tmp/demo3/audio-ears-demo.wav",
   "basename": "audio-ears-demo",
   "duration_s": 10.0,
   "sample_rate": 32000,
@@ -18,7 +18,7 @@
     "confidence": 0.81
   },
   "key_low_confidence": null,
-  "tempo_bpm": 200.0,
+  "tempo_bpm": 54.7,
   "sections": [
     {
       "start": 0.0,
@@ -376,8 +376,8 @@
     "darkest_hz": 450
   },
   "paths": {
-    "md": "/tmp/demo2/audio-ears-demo-声学分析报告.md",
-    "json": "/tmp/demo2/audio-ears-demo-分析.json",
-    "spectrogram": "/tmp/demo2/audio-ears-demo-声谱图.png"
+    "md": "/tmp/demo3/audio-ears-demo-声学分析报告.md",
+    "json": "/tmp/demo3/audio-ears-demo-分析.json",
+    "spectrogram": "/tmp/demo3/audio-ears-demo-声谱图.png"
   }
 }

@@ -48,7 +48,7 @@ import wave
 
 import numpy as np
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 SR_TARGET = 32000
 
@@ -429,15 +429,37 @@ def estimate_key(mono, sr):
 
 
 def estimate_tempo(env_db, hop, sr):
+    """速度估计：起音通量自相关 + 梳状打分（lag, 2lag, 3lag, 4lag 一起看）。
+
+    只看单个 lag 的最大峰会被「半拍/一拍」骗：长音连奏的曲子（音没断、包络不塌）
+    会锁到错的一层，实测把 120 BPM 的长音琶音报成 200。梳状打分相当于同时问
+    「这个周期和它的 2/3/4 倍处都有起音反复吗」，能把拍点层选对。
+    """
     if float(np.ptp(env_db)) < 3.0:  # 没有动态可言（静音恒噪底）就别硬猜速度
         return None
-    env = env_db - env_db.mean()
-    ac = np.correlate(env, env, mode="full")[len(env) - 1:]
+    onset = np.maximum(0.0, np.diff(env_db, prepend=env_db[0]))
+    onset = onset - onset.mean()
+    ac = np.correlate(onset, onset, mode="full")[len(onset) - 1:]
+    ac = ac / (ac[0] + 1e-12)
     fps = sr / hop
-    lo, hi = int(fps * 60 / 200), int(fps * 60 / 55)
-    if hi >= len(ac) or lo >= hi:
+    lo, hi = int(fps * 60 / 200), int(fps * 60 / 50)
+    hi = min(hi, len(ac) - 2)
+    if lo >= hi:
         return None
-    lag = lo + int(np.argmax(ac[lo:hi]))
+    best, best_score = None, -1e9
+    for lag in range(lo, hi + 1):
+        score = 0.0
+        for k in (1, 2, 3, 4):
+            j = lag * k
+            if j < len(ac):
+                score += ac[j] / k
+        if score > best_score:
+            best_score, best = score, lag
+    if not best:
+        return None
+    a, b, c = ac[best - 1], ac[best], ac[best + 1]
+    den = a - 2 * b + c
+    lag = best + (0.5 * (a - c) / den if abs(den) > 1e-12 else 0.0)
     return 60 * fps / lag
 
 

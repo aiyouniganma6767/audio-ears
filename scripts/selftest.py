@@ -275,6 +275,45 @@ def test_missing_file(tmp):
 
 # ---------------------------------------------------------------- v1.1 新增
 
+def test_tempo_clicks(tmp):
+    """节拍器：120 BPM 的均匀敲击要报在 120±10 内。"""
+    period = 60.0 / 120
+    x = np.zeros(int((0.6 + period * 12 + 0.5) * SR))
+    for i in range(12):
+        i0 = int((0.6 + i * period) * SR)
+        sig = struck(660.0, dur=0.25, decay=6.0)
+        x[i0:i0 + len(sig)] += sig[:len(x) - i0]
+    w = os.path.join(tmp, "clicks120.wav")
+    write_wav(w, x)
+    d = run_json(w, tmp)
+    assert d["tempo_bpm"] is not None, "没估出速度"
+    assert abs(d["tempo_bpm"] - 120) <= 10, f"报成 {d['tempo_bpm']} BPM，应接近 120"
+    return f"{d['tempo_bpm']:.0f} BPM（真值 120）"
+
+
+def test_tempo_legato(tmp):
+    """长音连奏（音不断、包络不塌）的 120 BPM 琶音：不能被锁到错误的一层。"""
+    notes = [261.63, 329.63, 392.0, 523.25, 392.0, 329.63, 261.63, 329.63]
+    x = mix(0.6 + 0.5 * len(notes) + 0.5,
+            [(0.6 + 0.5 * i, struck(f, dur=1.2, partials=BELL_PARTS, decay=2.5))
+             for i, f in enumerate(notes)])
+    w = os.path.join(tmp, "legato120.wav")
+    write_wav(w, x)
+    d = run_json(w, tmp)
+    assert d["tempo_bpm"] is not None, "没估出速度"
+    assert abs(d["tempo_bpm"] - 120) <= 15, f"报成 {d['tempo_bpm']} BPM（旧版锁到 200）"
+    return f"{d['tempo_bpm']:.0f} BPM（真值 120；旧版 200）"
+
+
+def test_cli_help_version(tmp):
+    """--version / --help 正常退出，版本号能对上。"""
+    v = subprocess.run([sys.executable, ANALYZE, "--version"], capture_output=True, text=True)
+    assert v.returncode == 0 and "audio-ears" in v.stdout, "--version 有问题"
+    h = subprocess.run([sys.executable, ANALYZE, "--help"], capture_output=True, text=True)
+    assert h.returncode == 0 and "--json" in h.stdout, "--help 里没有 --json"
+    return v.stdout.strip()
+
+
 def test_json_output(tmp):
     """--json：合法 JSON，字段齐、和 Markdown 对得上。"""
     w = os.path.join(tmp, "json330.wav")
@@ -411,6 +450,9 @@ CASES = [
     ("立体声", test_stereo),
     ("MP3 解码", test_mp3),
     ("错误处理", test_missing_file),
+    ("速度·节拍器", test_tempo_clicks),
+    ("速度·长音连奏", test_tempo_legato),
+    ("CLI help/version", test_cli_help_version),
     ("JSON 输出", test_json_output),
     ("并行音·三音和弦", test_chord_polyphony),
     ("并行音·单音不误报", test_single_voice_no_false_polyphony),

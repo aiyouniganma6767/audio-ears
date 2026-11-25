@@ -8,7 +8,7 @@ self-test that proves the ruler is not bent. No librosa, no PyTorch, no model do
 **numpy + ffmpeg only**, so it runs on a phone.
 
 ```bash
-python3 scripts/selftest.py                    # 21 checks against synthetic ground truth
+python3 scripts/selftest.py                    # 24 checks against synthetic ground truth
 python3 scripts/analyze.py song.mp3 out/       # -> out/song-声学分析报告.md (+ spectrogram)
 python3 scripts/analyze.py song.mp3 out/ --json # -> JSON on stdout (+ the same .md)
 ```
@@ -38,7 +38,7 @@ echo/tail repeats are de-duplicated with a deliberately narrow window.
   parabolic interpolation), nearest note, **cents deviation**, roughness, critical-band beat pairs.
 - **Structure**: splits on silence (≥1.2 s) plus spectral novelty (2 s cosine distance);
   per-segment mean level and active ratio.
-- **Key** (Krumhansl templates, with a confidence gate) and **tempo** (onset-envelope autocorrelation).
+- **Key** (Krumhansl templates, with a confidence gate) and **tempo** (comb-scored onset-flux autocorrelation).
 - **Time line**: spectral centroid (brightness) and roughness per 0.5 s, with hotspots.
 - **Simultaneous voices** (model, up to 3): candidate fundamentals must be integer-supported
   by at least two spectral peaks and form a common interval (±25 cents) with the main note;
@@ -81,6 +81,8 @@ used to mix and critique dozens of synthesized tracks.
 | unit rules | note names, beat pairs, roughness order | minor 2nd ≫ octave; 5 Hz beat pair found |
 | overdriven signal | clipping | 5,145 clipped samples, peak 0 dBFS |
 | 24-bit WAV | 261.63 Hz | C4, ±5 cents |
+| 120 BPM click train | 120 BPM | 120 BPM |
+| legato 120 BPM arpeggio (overlapping bells) | 120 BPM | 119 BPM (old build: 200) |
 | all-silent file | nothing to report | 0 events, no key/tempo/brightness |
 | two different notes 0.4 s apart | no echo removal | both kept |
 | `--no-spectrogram` | no PNG | PNG path null, Markdown still written |
@@ -141,7 +143,7 @@ For Claude-style skill bundles, the same directory works as a skill folder.
 这不是一个 MIR 库，是一个带误差棒的听诊器。
 
 - 跑分析：`python3 scripts/analyze.py <音频> [输出目录]`（加 `--json` 出结构化结果）
-- 自测：`python3 scripts/selftest.py`（21 项，全部用合成信号的真值验证）
+- 自测：`python3 scripts/selftest.py`（24 项，全部用合成信号的真值验证）
 - 边界：主音高取「最响的峰」；并行音最多猜 3 个、可能漏；真实混响素材系统性偏高约 +1.5 音分；
   结构分段是声学变化点，不是曲式。
 

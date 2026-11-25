@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.0 — 2026-11-26
+
+- **Tempo**: onset-flux autocorrelation is now comb-scored over lag × 2/3/4, with parabolic
+  refinement. Fixes legato material being locked to the wrong metrical level (a 120 BPM
+  arpeggio with overlapping bells used to report 200 BPM; now 119).
+- `--version` / `--help` covered by tests; self-test grew to 24 cases.
+
 ## 1.1.0 — 2026-11-26
 
 - **`--json`**: structured output on stdout (`basic`, `events`, `timeline`, `masking`,
