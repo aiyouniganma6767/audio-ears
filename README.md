@@ -3,15 +3,18 @@
 **A tiny audio-analysis skill for AI agents — it measures the sound and tells you how far to trust each number.**
 
 Agents can't hear. This skill gives an agent a ruler: pitch and cents, loudness, roughness,
-masking, segmentation, spectrograms — and a self-test that proves the ruler is not bent.
-No librosa, no PyTorch, no model downloads: **numpy + ffmpeg only**, so it runs on a phone.
+masking, segmentation, spectrograms, and a cautious guess at simultaneous voices — plus a
+self-test that proves the ruler is not bent. No librosa, no PyTorch, no model downloads:
+**numpy + ffmpeg only**, so it runs on a phone.
 
 ```bash
-python3 scripts/selftest.py                    # 12 checks against synthetic ground truth
+python3 scripts/selftest.py                    # 21 checks against synthetic ground truth
 python3 scripts/analyze.py song.mp3 out/       # -> out/song-声学分析报告.md (+ spectrogram)
+python3 scripts/analyze.py song.mp3 out/ --json # -> JSON on stdout (+ the same .md)
 ```
 
-A full sample report (from a synthetic three-bell demo): [examples/sample-report.md](examples/sample-report.md).
+A full sample report (from a synthetic demo with three bells, one chord and one masked partial):
+[examples/sample-report.md](examples/sample-report.md) · [examples/sample-analysis.json](examples/sample-analysis.json).
 
 ## Why another audio analyzer
 
@@ -37,8 +40,13 @@ echo/tail repeats are de-duplicated with a deliberately narrow window.
   per-segment mean level and active ratio.
 - **Key** (Krumhansl templates, with a confidence gate) and **tempo** (onset-envelope autocorrelation).
 - **Time line**: spectral centroid (brightness) and roughness per 0.5 s, with hotspots.
+- **Simultaneous voices** (model, up to 3): candidate fundamentals must be integer-supported
+  by at least two spectral peaks and form a common interval (±25 cents) with the main note;
+  octave/harmonic and inharmonic-partial candidates are filtered out.
 - **Masking hints**: weak partials sitting inside the critical band of a stronger one.
 - **Spectrogram**: matplotlib if available, else `ffmpeg showspectrumpic`, else skipped.
+- **JSON** (`--json`): every number above in a stable structure (`basic`, `events`, `timeline`,
+  `masking`, `sections`, `paths`, …), for programs rather than eyes.
 
 ## Requirements
 
@@ -67,6 +75,15 @@ used to mix and critique dozens of synthesized tracks.
 | stereo file | 2 channels | 2 channels + correlation |
 | MP3 round-trip | 440 Hz | 440.00 Hz |
 | missing file | clean error | exit 1 + message |
+| JSON output | valid JSON, 1 event | 23 top-level fields, paths exist |
+| chord C4+E4+G4 struck together | 3 fundamentals | C4 + E4 + G4 (±15 cents) |
+| single inharmonic bell | 1 voice | 1 voice (2.76/4.07 partials rejected) |
+| unit rules | note names, beat pairs, roughness order | minor 2nd ≫ octave; 5 Hz beat pair found |
+| overdriven signal | clipping | 5,145 clipped samples, peak 0 dBFS |
+| 24-bit WAV | 261.63 Hz | C4, ±5 cents |
+| all-silent file | nothing to report | 0 events, no key/tempo/brightness |
+| two different notes 0.4 s apart | no echo removal | both kept |
+| `--no-spectrogram` | no PNG | PNG path null, Markdown still written |
 
 These tests were written *after* the failures they now cover: an earlier build read a clean
 330.1 Hz E4 as 325.9 Hz (**−20 cents**, i.e. exactly a wolf fifth — the worst possible wrong
@@ -102,16 +119,17 @@ For Claude-style skill bundles, the same directory works as a skill folder.
 
 ## Known limits
 
-- **One fundamental at a time.** Simultaneous notes report only the loudest; dense textures
-  and chords are under-measured.
+- **Voices are a guess.** The main series reports the loudest fundamental; up to three
+  simultaneous voices are added when they clear the harmonic/interval filters. Dense textures
+  still under-report, and the reported "main" note of a chord is arbitrary (it's the loudest).
 - **+1.5 cents systematic bias** on real reverberant material (synthetic material: within ±3).
   Compare relative deviations within one file, not absolute pitch, unless calibrated.
 - **Key/tempo are models**, can lock to the wrong metrical level (half/double reported) or a
   relative key; the confidence gate is a filter, not a proof.
 - **Roughness is Sethares' pairwise model**, useful for ranking, meaningless as an absolute
   perceptual unit.
-- **Chinese output.** Report labels are Chinese; the numbers and tables parse fine but there is
-  no JSON mode yet. (PRs welcome.)
+- **Chinese output.** Human-readable report labels are Chinese; use `--json` for a machine-readable
+  structure instead of parsing the Markdown.
 
 ## 中文说明
 
@@ -122,9 +140,10 @@ For Claude-style skill bundles, the same directory works as a skill folder.
 没有 librosa、不下载模型，只依赖 numpy + ffmpeg——所以在手机上（proot Android）也能跑。
 这不是一个 MIR 库，是一个带误差棒的听诊器。
 
-- 跑分析：`python3 scripts/analyze.py <音频> [输出目录]`
-- 自测：`python3 scripts/selftest.py`（12 项，全部用合成信号的真值验证）
-- 边界：单声部音高假设；真实混响素材系统性偏高约 +1.5 音分；结构分段是声学变化点，不是曲式。
+- 跑分析：`python3 scripts/analyze.py <音频> [输出目录]`（加 `--json` 出结构化结果）
+- 自测：`python3 scripts/selftest.py`（21 项，全部用合成信号的真值验证）
+- 边界：主音高取「最响的峰」；并行音最多猜 3 个、可能漏；真实混响素材系统性偏高约 +1.5 音分；
+  结构分段是声学变化点，不是曲式。
 
 ## License
 

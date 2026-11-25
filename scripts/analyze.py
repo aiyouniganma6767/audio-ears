@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """声学分析：给 agent 用的一只「金耳朵」。
 
-对一段音频做可复现的测量，输出一份 Markdown 报告：
+对一段音频做可复现的测量，输出一份 Markdown 报告（`--json` 时输出结构化 JSON）：
 
 - 基本：时长、峰值、RMS、削顶、左右声道相关
 - 敲击/起音：时间、基频、最近音名、音分偏差、Sethares 粗糙度、临界带拍频
+- 并行音：一次起音里如果有多个基频（和弦/多声部），模型会猜最多 3 个
 - 结构：静默点 + 频谱新颖度（2 秒窗余弦距离）切段
 - 调性（Krumhansl 模板，带置信度门限）、速度（起音包络自相关）
 - 时间轴：谱重心（亮度）、粗糙度热点
@@ -16,20 +17,30 @@
 1. **基频用「[+20ms, +820ms] 窗口里 60–1500 Hz 最响的峰」+ 抛物线插值**。
    倒谱会被钟声的非整数倍分音（1.00/2.00/2.76/4.07/5.41/8.13）带到泛音上，
    自相关又容易低八度；在这类素材上「最响的峰」反而最稳。
-   代价：同时敲的音只报最响的那个（单声部假设），密集织体会漏音。
-2. **回声去重只有 0.2–0.8 秒内、电平更低、音高相近才算回声**。
+2. **并行音只报有把握的**：候选基频要至少被 2 个谱峰当整数倍支持（1.5% 容差），
+   而且是已选基频的整数倍时直接当泛音扔掉。所以它不会把钟的八度分音报成第二个音，
+   但真正的和弦（纯四/五度、三度）能报出来；密集织体仍然可能漏。
+3. **回声去重只有 0.2–0.8 秒内、电平更低、音高相近才算回声**。
    窗口再放大会误伤加速段里真正的连续敲击。
-3. **安静段（低于峰值 45 dB）不算粗糙度/亮度**。否则淡出尾巴里的噪声会被报成
+4. **安静段（低于峰值 45 dB）不算粗糙度/亮度**。否则淡出尾巴里的噪声会被报成
    「粗糙度 0.8」，看着吓人，其实是零信号。
-4. **输入格式不挑**：WAV 直接用标准库读，其它格式交给 ffmpeg；没有 ffmpeg 就直说。
-5. **依赖只有 numpy**；ffmpeg / matplotlib 是可选的。
+5. **起音电平门往后看 3 帧**：mp3/aac 的有损编码会把起音糊开几帧，
+   用同一帧判断会把整首 MP3 的起音全漏掉。
+6. **输入格式不挑**：WAV 直接用标准库读（8/16/24/32 bit），其它格式交给 ffmpeg。
+7. **依赖只有 numpy**；ffmpeg / matplotlib 是可选的。
 
-已知局限：单声部音高假设；真实混响素材系统性偏高约 +1.5 音分（纯合成素材在 ±3 音分内）；
-结构分段是声学变化点，不是曲式分析；粗糙度是 Sethares 模型的相对值，不是听感。
+已知局限：音高是「最响的峰」而不是真正的多基频估计，密集织体只报最响的那几个；
+真实混响素材系统性偏高约 +1.5 音分（纯合成素材在 ±3 音分内）；结构分段是声学变化点，
+不是曲式分析；粗糙度是 Sethares 模型的相对值，不是听感。
 
-用法: python3 analyze.py <音频文件> [输出目录]
-输出: Markdown 报告（stdout + 文件）+ 声谱图 PNG（有工具时）；最后打 MEDIA: 行。
+用法:
+    python3 analyze.py <音频文件> [输出目录] [--json] [--no-spectrogram]
+输出:
+    默认：Markdown 报告（stdout + `<名字>-声学分析报告.md`）+ 声谱图 PNG（有工具时）
+    --json：stdout 只打一份 JSON（同时仍写 Markdown 报告），路径在 JSON 的 paths 里
 """
+import argparse
+import json
 import os
 import subprocess
 import sys
@@ -37,6 +48,7 @@ import wave
 
 import numpy as np
 
+VERSION = "1.1.0"
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 SR_TARGET = 32000
 
@@ -106,14 +118,14 @@ def frame_rms(x, sr, hop_s=0.01, win_s=0.025):
     return rms, hop
 
 
-def spectrum_peaks(seg, sr, max_peaks=10):
+def spectrum_peaks(seg, sr, max_peaks=10, floor=0.04):
     n = len(seg)
     if n < 128:
         return []
     mag = np.abs(np.fft.rfft(seg * np.hanning(n), 1 << int(np.ceil(np.log2(n * 4)))))
     nfft = (len(mag) - 1) * 2
     freqs = np.fft.rfftfreq(nfft, 1 / sr)
-    thr = mag.max() * 0.04
+    thr = mag.max() * floor
     idx = np.where((mag[1:-1] > mag[:-2]) & (mag[1:-1] >= mag[2:]) & (mag[1:-1] > thr))[0] + 1
     peaks = []
     for i in idx:
@@ -131,8 +143,7 @@ def estimate_f0(seg, sr, lo=55.0, hi=1500.0):
 
     为什么不用倒谱/自相关：钟声是非整数倍分音（1.00/2.00/2.76/4.07/5.41/8.13），
     倒谱会被分音间距带到泛音上，自相关又容易低八度。实测这套素材里，
-    「60–1500Hz 里最响的峰」最稳：干净 E4 报 330.3Hz（+2音分），窄狼报 325.7Hz（+1音分）。
-    起音瞬间的噪声会把峰拉偏（0.32 秒窗时能偏到 −6 音分），所以窗口拉到 0.8 秒。
+    「60–1500Hz 里最响的峰」最稳。
     """
     seg = seg - np.mean(seg)
     n = len(seg)
@@ -153,6 +164,63 @@ def estimate_f0(seg, sr, lo=55.0, hi=1500.0):
     else:
         f0 = fr[i]
     return float(f0) if lo <= f0 <= hi else None
+
+
+def _interval_ok(f, g, tol_cents=25.0):
+    """f 和 g 的间距是不是一个「像和弦成员」的音程（±25 音分内落在半音格上，
+    并且是半音阶上的 2/3/4/5/7/8/9 度——八度会被前面的整数倍判据挡掉）。"""
+    c = 1200.0 * np.log2(f / g) % 1200.0
+    st = int(round(c / 100.0))
+    return abs(c - st * 100.0) <= tol_cents and st % 12 in (2, 3, 4, 5, 7, 8, 9)
+
+
+def voices_at(seg, sr, max_voices=3):
+    """估这一段里有哪几个并行的基频（单声部时只有一个）。
+
+    做法：取谱峰，把 55–1200 Hz 的峰逐个当作候选基频；候选要至少被 2 个峰
+    当作整数倍支持（1.5% 容差）；已经选中的基频的整数倍（八度/泛音）直接扔掉，
+    免得把钟的第二个分音报成第二个声部。最多 max_voices 个，按响度排序。
+    """
+    peaks = spectrum_peaks(seg, sr, max_peaks=24, floor=0.02)
+    if not peaks:
+        return []
+    amax = peaks[0][1]
+    cands = []
+    for f, a in peaks:
+        if not (55.0 <= f <= 1200.0):
+            continue
+        n, support = 0, 0.0
+        for g, aa in peaks:
+            k = g / f
+            if k < 1 or k > 8.2:
+                continue
+            if abs(k - round(k)) <= 0.015:
+                n += 1
+                support += aa
+        if n >= 2:
+            cands.append((f, a, support))
+    cands.sort(key=lambda c: -c[1])
+    strong = [(g, aa) for g, aa in peaks if aa > 0.10 * amax]
+    chosen = []
+    for f, a, _support in cands:
+        if a < 0.10 * amax:
+            break
+        if any(abs(1200.0 * np.log2(f / g)) < 60.0 for g in chosen):
+            continue  # 同音
+        if any(abs(f / g - round(f / g)) <= 0.015 and round(f / g) >= 2 for g in chosen):
+            continue  # 是已选基频的泛音
+        # 上泛音判据：如果 f/k（k=2..4）附近有强峰，说明 f 更像某个低音的泛音。
+        # 非整数倍分音（钟的 2.76/4.07/…）的子谐波和真分音对不齐，所以这条能把它挡掉。
+        if any(abs(f / k - g) / g < 0.02 for k in (2, 3, 4) for g, _aa in strong if g < f):
+            continue
+        # 音程判据：只报和已选基频构成常见音程（±25 音分内的大二度到六度）的声部。
+        # 钟的 2.76/4.07 分音和基频差 557/2440 音分，落不到半音格上，正好被挡掉。
+        if chosen and not any(_interval_ok(f, g) for g in chosen):
+            continue
+        chosen.append(f)
+        if len(chosen) >= max_voices:
+            break
+    return chosen
 
 
 def note_of(f):
@@ -340,13 +408,19 @@ def estimate_key(mono, sr):
             if 60 <= fr[i] <= 2000:
                 midi = int(round(69 + 12 * np.log2(fr[i] / 440.0)))
                 pc[midi % 12] += mag[i]
-    pc = pc / (pc.sum() + 1e-12)
+    if pc.sum() <= 1e-9:  # 静音/近乎静音：没有可用的调性证据
+        return 0.0, "", ""
+    pc = pc / pc.sum()
     MAJ = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
     MIN = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
-    best = (-9, "", "")
+    best = (0.0, "", "")
     for r in range(12):
         maj = np.corrcoef(pc, np.roll(MAJ, r))[0, 1]
         mi = np.corrcoef(pc, np.roll(MIN, r))[0, 1]
+        if not np.isfinite(maj):
+            maj = 0.0
+        if not np.isfinite(mi):
+            mi = 0.0
         if maj > best[0]:
             best = (maj, NOTE_NAMES[r], "大调")
         if mi > best[0]:
@@ -355,6 +429,8 @@ def estimate_key(mono, sr):
 
 
 def estimate_tempo(env_db, hop, sr):
+    if float(np.ptp(env_db)) < 3.0:  # 没有动态可言（静音恒噪底）就别硬猜速度
+        return None
     env = env_db - env_db.mean()
     ac = np.correlate(env, env, mode="full")[len(env) - 1:]
     fps = sr / hop
@@ -365,25 +441,15 @@ def estimate_tempo(env_db, hop, sr):
     return 60 * fps / lag
 
 
-# ---------------------------------------------------------------- 主流程
+# ---------------------------------------------------------------- 主分析
 
-def main():
-    if len(sys.argv) < 2:
-        print("用法: python3 analyze.py <音频文件> [输出目录]")
-        sys.exit(1)
-    path = sys.argv[1]
-    if not os.path.exists(path):
-        print(f"找不到文件: {path}")
-        sys.exit(1)
-    outdir = sys.argv[2] if len(sys.argv) > 2 else os.path.dirname(os.path.abspath(path))
+def analyze(path, outdir=None, want_spectrogram=True):
+    """跑完整分析，返回结果 dict（JSON 可序列化）。"""
+    outdir = outdir or os.path.dirname(os.path.abspath(path))
     os.makedirs(outdir, exist_ok=True)
     base = os.path.splitext(os.path.basename(path))[0]
 
-    try:
-        x, sr = load_audio(path)
-    except Exception as ex:
-        print(f"读取失败：{ex}")
-        sys.exit(1)
+    x, sr = load_audio(path)
 
     total = len(x) / sr
     truncated = False
@@ -392,7 +458,7 @@ def main():
         total = 900.0
         truncated = True
     ch = x.shape[1]
-    mono = x.mean(axis=1)
+    mono = x.mean(axis=1) if ch > 1 else x[:, 0]
 
     rms, hop = frame_rms(mono, sr)
     env_db = 20 * np.log10(rms + 1e-9)
@@ -420,8 +486,21 @@ def main():
             continue
         name, cents = note_of(f0)
         lv = 20 * np.log10(np.sqrt(np.mean(seg**2)) + 1e-12)
-        events.append(dict(t=t, f0=f0, name=name, cents=cents, level=lv,
-                           rough=roughness(pk), beats=beat_pairs(pk), peaks=pk))
+        voices = voices_at(seg, sr)
+        if not any(abs(1200 * np.log2(f0 / f)) < 50 for f in voices):
+            voices = [f0] + [f for f in voices if f < 0.9 * f0 or f > 1.1 * f0]
+        voice_info = []
+        for f in voices[:3]:
+            n, c = note_of(f)
+            voice_info.append({"f0_hz": round(float(f), 2), "note": n, "cents": round(float(c), 1)})
+        events.append(dict(
+            t=round(float(t), 3), f0=float(f0), name=name, cents=float(cents), level=float(lv),
+            rough=roughness(pk),
+            beats=[{"f1_hz": round(f1, 1), "f2_hz": round(f2, 1),
+                    "delta_hz": round(df, 2), "amp_ratio": round(ratio, 2)}
+                   for f1, f2, df, ratio in beat_pairs(pk)[:5]],
+            peaks=pk, voices=voice_info,
+        ))
 
     # 回声去重：0.2–0.8s 内、电平更低、音高相近 → 判为同一击的回声
     events, n_echo = dedupe_echoes(events)
@@ -459,82 +538,24 @@ def main():
     for a, b in zip(bounds[:-1], bounds[1:]):
         ia, ib = int(a * sr / hop), max(int(b * sr / hop), int(a * sr / hop) + 1)
         seg = env_db[ia:min(ib, len(env_db))]
-        secs.append((a, b, float(np.mean(seg)) - ref,
-                     float(np.mean(seg > ref - 35))))
+        secs.append({"start": round(a, 2), "end": round(b, 2),
+                     "mean_rel_db": round(float(np.mean(seg)) - ref, 1) if len(seg) else -99.0,
+                     "active_ratio": round(float(np.mean(seg > ref - 35)), 3) if len(seg) else 0.0})
 
     key_conf, key_root, key_mode = estimate_key(mono, sr)
     bpm = estimate_tempo(env_db, hop, sr)
 
-    L = []
-    L.append(f"# 声学分析报告 · {base}\n")
-    L.append("> 物理测量与心理声学模型推断，不是真实听感。听感结论以耳朵为准。\n")
-    L.append("## 基本信息\n")
-    L.append(f"- 时长 {total:.1f}s | 采样率 {sr}Hz | 声道 {'立体声' if ch == 2 else '单声道' if ch == 1 else str(ch)}")
-    L.append(f"- 峰值 {20*np.log10(peak+1e-12):.1f} dBFS | 整体 RMS {20*np.log10(full_rms):.1f} dBFS | 削顶样本 {clip_n}")
-    if ch == 2:
-        lr = np.sqrt(np.mean(x**2, axis=0))
-        corr = float(np.corrcoef(x[:, 0], x[:, 1])[0, 1])
-        L.append(f"- 左/右 RMS: {20*np.log10(lr[0]+1e-12):.1f} / {20*np.log10(lr[1]+1e-12):.1f} dBFS | 声道相关 {corr:.2f}（越低越宽）")
-    if key_conf >= 0.45:
-        L.append(f"- 调性(模板推测) {key_root} {key_mode}，吻合度 {key_conf:.2f}")
-    else:
-        L.append(f"- 调性(模板推测) 置信度低 ({key_conf:.2f})，跳过")
-    if bpm:
-        L.append(f"- 速度(起音包络推测) {bpm:.0f} BPM（半速 {bpm/2:.0f} / 双速 {bpm*2:.0f}）")
-    if truncated:
-        L.append("- ⚠️ 超过 15 分钟，仅分析前 15 分钟")
-
-    L.append("\n## 结构分段（静默点 + 频谱新颖度）\n")
-    L.append("| 起 | 止 | 平均相对响度 | 活跃占比 |")
-    L.append("|---|---|---|---|")
-    for a, b, lv, act in secs:
-        L.append(f"| {a:.1f}s | {b:.1f}s | {lv:.1f} dB | {act*100:.0f}% |")
-    if sil_runs:
-        L.append(f"\n- 检测到 {len(sil_runs)} 段 ≥1.2 秒的静默")
-    L.append(f"- 频谱变化点（推测）: " + (", ".join(f"{t:.1f}s" for t in nov_bounds) if nov_bounds else "没测到明显变化"))
-
-    L.append(f"\n## 敲击/起音点（共 {len(events)} 个，已剔除 {n_echo} 个疑似回声）\n")
-    if events:
-        L.append("| 时间 | 基频(峰值) | 最近音名 | 偏差(音分) | 粗糙度 |")
-        L.append("|---|---|---|---|---|")
-        for e in events:
-            L.append(f"| {e['t']:.2f}s | {e['f0']:.1f}Hz | {e['name']} | {e['cents']:+.0f} | {e['rough']:.3f} |")
-        raw = [onsets[0]] if onsets else []
-        for t in onsets[1:]:
-            if t - raw[-1] >= 0.35:
-                raw.append(t)
-        gaps = np.array([b - a for a, b in zip(raw[:-1], raw[1:]) if b - a < 10.0])
-        if len(gaps) >= 3:
-            h1, h2 = gaps[: len(gaps) // 2], gaps[len(gaps) // 2:]
-            trend = ("趋于变密（加速感）" if np.median(h2) < np.median(h1) * 0.8
-                     else "趋于变疏（减速感）" if np.median(h2) > np.median(h1) * 1.25
-                     else "大体均匀")
-            L.append(f"\n- 起音间隔中位数 {np.median(gaps):.2f}s，前半 {np.median(h1):.2f}s → 后半 {np.median(h2):.2f}s：{trend}")
-    else:
-        L.append("未检测到明显起音（可能是持续音或电平过低）。")
-    L.append("\n注：基频取 [+20ms, +820ms] 窗口内 60–1500Hz 最响的峰（抛物线插值）；纯合成素材误差在 ±3 音分内，真实混响素材实测系统性偏高约 +1.5 音分——同一首里比较相对偏差比看绝对值可靠。同时敲的音只报最响的那个。")
-
-    L.append("\n## 拍频与粗糙度热点\n")
+    # 粗糙度热点（时间轴前 5 名，按时间顺序铺开）
     valid = ~np.isnan(tl_r)
+    hotspots = []
     if valid.any():
         order = np.argsort(-np.where(valid, tl_r, -1))[:5]
-        L.append("| 时间 | 粗糙度 | 谱重心(亮度) |")
-        L.append("|---|---|---|")
         for i in sorted(order):
-            cen = tl_c[i]
-            L.append(f"| {tl_t[i]:.1f}s | {tl_r[i]:.3f} | {'—' if np.isnan(cen) else f'{cen:.0f}Hz'} |")
-        if events:
-            hot = max(events, key=lambda e: e["rough"])
-            if hot["beats"]:
-                L.append(f"\n最粗糙起音 {hot['t']:.2f}s 处的临界带近频对（拍频来源）：")
-                for f1, f2, df, ratio in hot["beats"][:5]:
-                    L.append(f"- {f1:.1f}Hz × {f2:.1f}Hz → 拍频约 {df:.1f}Hz（幅度比 {ratio:.2f}）")
-        L.append("\n注：粗糙度是 Sethares 模型的相对值；1–6Hz 拍频像晃动，8–30Hz 进入粗糙区。")
-    else:
-        L.append("没有可用的响段（整首太安静？），跳过。")
+            hotspots.append({"t": round(float(tl_t[i]), 1), "roughness": round(float(tl_r[i]), 3),
+                             "brightness_hz": None if np.isnan(tl_c[i]) else round(float(tl_c[i]))})
 
-    L.append("\n## 掩蔽提示\n")
-    masked = []
+    # 掩蔽：弱成分贴着更强的成分、同临界带
+    masking = []
     for e in events:
         pk = e["peaks"]
         if len(pk) < 2:
@@ -546,35 +567,101 @@ def main():
                     if g < f and f - g > 15 and b > 6 * a:
                         cb = 100.0 if g < 500 else 0.2 * g
                         if f - g < cb:
-                            masked.append((e["t"], f, g))
+                            masking.append({"t": round(e["t"], 2), "weak_hz": round(f),
+                                            "strong_hz": round(g)})
                             break
-    if masked:
-        for t, f, g in masked[:6]:
-            L.append(f"- {t:.2f}s：{f:.0f}Hz 成分较弱且贴近更强的 {g:.0f}Hz（同临界带），可能被掩蔽")
-    else:
-        L.append("未发现明显的弱成分掩蔽风险。")
+                if len(masking) >= 6:
+                    break
+        if len(masking) >= 6:
+            break
 
-    L.append("\n## 亮度（谱重心）\n")
+    # 亮度
+    brightness = None
     if (~np.isnan(tl_c)).any():
         c = tl_c[~np.isnan(tl_c)]
-        L.append(f"- 响段中位 {np.median(c):.0f}Hz，范围 {np.percentile(c,10):.0f}–{np.percentile(c,90):.0f}Hz")
-        L.append(f"- 最亮 {tl_t[np.nanargmax(tl_c)]:.1f}s（{np.nanmax(tl_c):.0f}Hz），最暗 {tl_t[np.nanargmin(tl_c)]:.1f}s（{np.nanmin(tl_c):.0f}Hz）")
+        brightness = {
+            "median_hz": round(float(np.median(c))),
+            "p10_hz": round(float(np.percentile(c, 10))),
+            "p90_hz": round(float(np.percentile(c, 90))),
+            "brightest_s": round(float(tl_t[np.nanargmax(tl_c)]), 1),
+            "darkest_s": round(float(tl_t[np.nanargmin(tl_c)]), 1),
+            "brightest_hz": round(float(np.nanmax(tl_c))),
+            "darkest_hz": round(float(np.nanmin(tl_c))),
+        }
+
+    # 起音间隔趋势（用原始起音，不用筛过音高的）
+    gaps_info = None
+    raw = [onsets[0]] if onsets else []
+    for t in onsets[1:]:
+        if t - raw[-1] >= 0.35:
+            raw.append(t)
+    gaps = np.array([b - a for a, b in zip(raw[:-1], raw[1:]) if b - a < 10.0])
+    if len(gaps) >= 3:
+        h1, h2 = gaps[: len(gaps) // 2], gaps[len(gaps) // 2:]
+        trend = ("趋于变密（加速感）" if np.median(h2) < np.median(h1) * 0.8
+                 else "趋于变疏（减速感）" if np.median(h2) > np.median(h1) * 1.25
+                 else "大体均匀")
+        gaps_info = {"median_s": round(float(np.median(gaps)), 2),
+                     "first_half_median_s": round(float(np.median(h1)), 2),
+                     "second_half_median_s": round(float(np.median(h2)), 2),
+                     "trend": trend}
+
+    res = {
+        "tool": "audio-ears",
+        "version": VERSION,
+        "file": os.path.abspath(path),
+        "basename": base,
+        "duration_s": round(total, 2),
+        "sample_rate": sr,
+        "channels": ch,
+        "truncated_at_15min": truncated,
+        "basic": {
+            "peak_dbfs": round(20 * np.log10(peak + 1e-12), 1),
+            "rms_dbfs": round(20 * np.log10(full_rms), 1),
+            "clip_samples": clip_n,
+        },
+        "key": None if key_conf < 0.45 else {
+            "root": key_root, "mode": key_mode, "confidence": round(float(key_conf), 2)},
+        "key_low_confidence": None if key_conf >= 0.45 else round(float(key_conf), 2),
+        "tempo_bpm": round(float(bpm), 1) if bpm else None,
+        "sections": secs,
+        "silence_runs": [[round(a, 2), round(b, 2)] for a, b in sil_runs],
+        "novelty_points": [round(float(t), 1) for t in nov_bounds],
+        "events": events,
+        "echoes_removed": n_echo,
+        "onset_gaps": gaps_info,
+        "timeline": {
+            "step_s": 0.5,
+            "t": [round(float(v), 2) for v in tl_t],
+            "brightness_hz": [None if np.isnan(v) else round(float(v)) for v in tl_c],
+            "roughness": [None if np.isnan(v) else round(float(v), 3) for v in tl_r],
+        },
+        "roughness_hotspots": hotspots,
+        "masking": masking,
+        "brightness": brightness,
+        "paths": {"md": os.path.join(outdir, f"{base}-声学分析报告.md"),
+                  "json": os.path.join(outdir, f"{base}-分析.json"),
+                  "spectrogram": os.path.join(outdir, f"{base}-声谱图.png")},
+    }
+    if ch == 2:
+        lr = np.sqrt(np.mean(x**2, axis=0))
+        res["basic"]["lr_rms_dbfs"] = [round(20 * np.log10(lr[0] + 1e-12), 1),
+                                       round(20 * np.log10(lr[1] + 1e-12), 1)]
+        res["basic"]["lr_correlation"] = round(float(np.corrcoef(x[:, 0], x[:, 1])[0, 1]), 2)
+
+    if want_spectrogram:
+        res["paths"]["spectrogram"] = _make_spectrogram(path, mono, sr, total, env_db, hop, tl_t, tl_r, res["paths"]["spectrogram"])
     else:
-        L.append("没有可用的响段。")
+        res["paths"]["spectrogram"] = None
+    return res
 
-    report = "\n".join(L) + "\n"
-    md_path = os.path.join(outdir, f"{base}-声学分析报告.md")
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(report)
 
-    # 声谱图：matplotlib 优先，没有就 ffmpeg
-    png_path = os.path.join(outdir, f"{base}-声谱图.png")
-    made = False
+def _make_spectrogram(path, mono, sr, total, env_db, hop, tl_t, tl_r, png_path):
+    """声谱图：matplotlib 优先，没有就 ffmpeg showspectrumpic，都没有就不出图。"""
     try:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-        from matplotlib import font_manager  # noqa: F401
         win_n, hop_n = 1024, 512
         frames = []
         w = np.hanning(win_n)
@@ -583,6 +670,7 @@ def main():
         S = 20 * np.log10(np.array(frames).T + 1e-9)
         fr = np.fft.rfftfreq(win_n, 1 / sr)
         keep = fr <= 5000
+        ref = env_db.max()
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 7), sharex=True,
                                        gridspec_kw={"height_ratios": [2.2, 1]})
         ax1.imshow(S[keep], origin="lower", aspect="auto", cmap="magma",
@@ -597,26 +685,153 @@ def main():
         ax3 = ax2.twinx()
         ax3.plot(tl_t, np.nan_to_num(tl_r, nan=0.0), lw=1.2, color="tab:red")
         ax3.set_ylabel("Roughness", color="tab:red")
-        for t in onsets:
-            ax2.axvline(t, color="gray", lw=0.3, alpha=0.5)
         fig.tight_layout()
         fig.savefig(png_path, dpi=150)
         plt.close(fig)
-        made = True
+        return png_path
     except Exception:
         try:
             subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", path, "-lavfi",
                             "showspectrumpic=s=1200x600:legend=1:color=intensity", png_path],
                            check=True)
-            made = True
+            return png_path
         except Exception:
-            png_path = None
+            return None
 
-    print(report)
-    print(f"MEDIA:{md_path}")
-    if made:
-        print(f"MEDIA:{png_path}")
+
+# ---------------------------------------------------------------- 报告渲染
+
+def render_report(res):
+    L = []
+    L.append(f"# 声学分析报告 · {res['basename']}\n")
+    L.append("> 物理测量与心理声学模型推断，不是真实听感。听感结论以耳朵为准。\n")
+    L.append("## 基本信息\n")
+    L.append(f"- 时长 {res['duration_s']:.1f}s | 采样率 {res['sample_rate']}Hz | 声道 "
+             f"{'立体声' if res['channels'] == 2 else '单声道' if res['channels'] == 1 else str(res['channels'])}")
+    b = res["basic"]
+    L.append(f"- 峰值 {b['peak_dbfs']:.1f} dBFS | 整体 RMS {b['rms_dbfs']:.1f} dBFS | 削顶样本 {b['clip_samples']}")
+    if res["channels"] == 2 and "lr_correlation" in b:
+        L.append(f"- 左/右 RMS: {b['lr_rms_dbfs'][0]:.1f} / {b['lr_rms_dbfs'][1]:.1f} dBFS | "
+                 f"声道相关 {b['lr_correlation']:.2f}（越低越宽）")
+    if res["key"]:
+        L.append(f"- 调性(模板推测) {res['key']['root']} {res['key']['mode']}，吻合度 {res['key']['confidence']:.2f}")
+    else:
+        L.append(f"- 调性(模板推测) 置信度低 ({res['key_low_confidence']:.2f})，跳过")
+    if res["tempo_bpm"]:
+        L.append(f"- 速度(起音包络推测) {res['tempo_bpm']:.0f} BPM（半速 {res['tempo_bpm']/2:.0f} / 双速 {res['tempo_bpm']*2:.0f}）")
+    if res["truncated_at_15min"]:
+        L.append("- ⚠️ 超过 15 分钟，仅分析前 15 分钟")
+
+    L.append("\n## 结构分段（静默点 + 频谱新颖度）\n")
+    L.append("| 起 | 止 | 平均相对响度 | 活跃占比 |")
+    L.append("|---|---|---|---|")
+    for s in res["sections"]:
+        L.append(f"| {s['start']:.1f}s | {s['end']:.1f}s | {s['mean_rel_db']:.1f} dB | {s['active_ratio']*100:.0f}% |")
+    if res["silence_runs"]:
+        L.append(f"\n- 检测到 {len(res['silence_runs'])} 段 ≥1.2 秒的静默")
+    L.append(f"- 频谱变化点（推测）: " + (
+        ", ".join(f"{t:.1f}s" for t in res["novelty_points"]) if res["novelty_points"] else "没测到明显变化"))
+
+    L.append(f"\n## 敲击/起音点（共 {len(res['events'])} 个，已剔除 {res['echoes_removed']} 个疑似回声）\n")
+    if res["events"]:
+        L.append("| 时间 | 基频(峰值) | 最近音名 | 偏差(音分) | 粗糙度 |")
+        L.append("|---|---|---|---|---|")
+        for e in res["events"]:
+            L.append(f"| {e['t']:.2f}s | {e['f0']:.1f}Hz | {e['name']} | {e['cents']:+.0f} | {e['rough']:.3f} |")
+        g = res["onset_gaps"]
+        if g:
+            L.append(f"\n- 起音间隔中位数 {g['median_s']:.2f}s，前半 {g['first_half_median_s']:.2f}s → "
+                     f"后半 {g['second_half_median_s']:.2f}s：{g['trend']}")
+        poly = [e for e in res["events"] if len(e["voices"]) > 1]
+        if poly:
+            L.append("\n- 并行音（模型推测，最多 3 个）：")
+            for e in poly[:6]:
+                parts = " + ".join(f"{v['note']} {v['f0_hz']:.1f}Hz" for v in e["voices"])
+                L.append(f"  - {e['t']:.2f}s → {parts}")
+    else:
+        L.append("未检测到明显起音（可能是持续音或电平过低）。")
+    L.append("\n注：基频取 [+20ms, +820ms] 窗口内 60–1500Hz 最响的峰（抛物线插值）；纯合成素材误差在 ±3 音分内，"
+             "真实混响素材实测系统性偏高约 +1.5 音分——同一首里比较相对偏差比看绝对值可靠。"
+             "并行音是模型猜的：同时敲的音只保证报出最响的那个，多声部可能漏。")
+
+    L.append("\n## 拍频与粗糙度热点\n")
+    if res["roughness_hotspots"]:
+        L.append("| 时间 | 粗糙度 | 谱重心(亮度) |")
+        L.append("|---|---|---|")
+        for h in res["roughness_hotspots"]:
+            cen = "—" if h["brightness_hz"] is None else f"{h['brightness_hz']:.0f}Hz"
+            L.append(f"| {h['t']:.1f}s | {h['roughness']:.3f} | {cen} |")
+        hot = max(res["events"], key=lambda e: e["rough"]) if res["events"] else None
+        if hot and hot["beats"]:
+            L.append(f"\n最粗糙起音 {hot['t']:.2f}s 处的临界带近频对（拍频来源）：")
+            for bp in hot["beats"]:
+                L.append(f"- {bp['f1_hz']:.1f}Hz × {bp['f2_hz']:.1f}Hz → 拍频约 {bp['delta_hz']:.1f}Hz"
+                         f"（幅度比 {bp['amp_ratio']:.2f}）")
+        L.append("\n注：粗糙度是 Sethares 模型的相对值；1–6Hz 拍频像晃动，8–30Hz 进入粗糙区。")
+    else:
+        L.append("没有可用的响段（整首太安静？），跳过。")
+
+    L.append("\n## 掩蔽提示\n")
+    if res["masking"]:
+        for m in res["masking"]:
+            L.append(f"- {m['t']:.2f}s：{m['weak_hz']}Hz 成分较弱且贴近更强的 {m['strong_hz']}Hz（同临界带），可能被掩蔽")
+    else:
+        L.append("未发现明显的弱成分掩蔽风险。")
+
+    L.append("\n## 亮度（谱重心）\n")
+    br = res["brightness"]
+    if br:
+        L.append(f"- 响段中位 {br['median_hz']}Hz，范围 {br['p10_hz']}–{br['p90_hz']}Hz")
+        L.append(f"- 最亮 {br['brightest_s']:.1f}s（{br['brightest_hz']}Hz），最暗 {br['darkest_s']:.1f}s（{br['darkest_hz']}Hz）")
+    else:
+        L.append("没有可用的响段。")
+
+    L.append("\n---\n")
+    L.append(f"版本 {res['version']} · `--json` 可拿结构化结果")
+    return "\n".join(L) + "\n"
+
+
+# ---------------------------------------------------------------- CLI
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        prog="analyze.py",
+        description="音频分析：测量、音高/音分、粗糙度、掩蔽、分段、声谱图（不假装听到了）。",
+    )
+    ap.add_argument("audio", help="音频文件（wav/mp3/m4a/flac…）")
+    ap.add_argument("outdir", nargs="?", help="输出目录，默认和音频同目录")
+    ap.add_argument("--json", action="store_true", help="stdout 输出 JSON（仍写 Markdown 报告）")
+    ap.add_argument("--no-spectrogram", action="store_true", help="不生成声谱图")
+    ap.add_argument("--version", action="version", version=f"audio-ears {VERSION}")
+    args = ap.parse_args(argv)
+
+    if not os.path.exists(args.audio):
+        print(f"找不到文件: {args.audio}")
+        return 1
+    try:
+        res = analyze(args.audio, args.outdir, want_spectrogram=not args.no_spectrogram)
+    except Exception as ex:
+        print(f"读取失败：{ex}")
+        return 1
+
+    md = render_report(res)
+    with open(res["paths"]["md"], "w", encoding="utf-8") as f:
+        f.write(md)
+    with open(res["paths"]["json"], "w", encoding="utf-8") as f:
+        json.dump(res, f, ensure_ascii=False, indent=2)
+
+    if args.json:
+        res["paths"]["md"] = os.path.abspath(res["paths"]["md"])
+        res["paths"]["json"] = os.path.abspath(res["paths"]["json"])
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        return 0
+
+    print(md)
+    print(f"MEDIA:{res['paths']['md']}")
+    if res["paths"]["spectrogram"]:
+        print(f"MEDIA:{res['paths']['spectrogram']}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
