@@ -40,9 +40,10 @@ echo/tail repeats are de-duplicated with a deliberately narrow window.
   per-segment mean level and active ratio.
 - **Key** (Krumhansl templates, with a confidence gate) and **tempo** (comb-scored onset-flux autocorrelation).
 - **Time line**: spectral centroid (brightness) and roughness per 0.5 s, with hotspots.
-- **Simultaneous voices** (model, up to 3): candidate fundamentals must be integer-supported
-  by at least two spectral peaks and form a common interval (±25 cents) with the main note;
-  octave/harmonic and inharmonic-partial candidates are filtered out.
+- **Simultaneous voices** (model, up to 3): other fundamentals still ringing inside the same
+  analysis window — including the tail of the previous strike, so it is *not* a chord transcription.
+  Candidates must be integer-supported by at least two spectral peaks and form a common interval
+  (±25 cents) with the main note; octave/harmonic and inharmonic-partial candidates are filtered out.
 - **Masking hints**: weak partials sitting inside the critical band of a stronger one.
 - **Spectrogram**: matplotlib if available, else `ffmpeg showspectrumpic`, else skipped.
 - **JSON** (`--json`): every number above in a stable structure (`basic`, `events`, `timeline`,
@@ -122,8 +123,10 @@ For Claude-style skill bundles, the same directory works as a skill folder.
 ## Known limits
 
 - **Voices are a guess.** The main series reports the loudest fundamental; up to three
-  simultaneous voices are added when they clear the harmonic/interval filters. Dense textures
-  still under-report, and the reported "main" note of a chord is arbitrary (it's the loudest).
+  simultaneously ringing fundamentals are added when they clear the harmonic/interval filters.
+  Because the window is 0.8 s long, a previous strike's tail can be reported as a "voice" — this
+  is a decay-tail effect, not always a chord. Dense textures still under-report, and the reported
+  "main" note of a chord is arbitrary (it's the loudest).
 - **+1.5 cents systematic bias** on real reverberant material (synthetic material: within ±3).
   Compare relative deviations within one file, not absolute pitch, unless calibrated.
 - **Key/tempo are models**, can lock to the wrong metrical level (half/double reported) or a

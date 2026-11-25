@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.1 — 2026-11-26
+
+- Report wording: "parallel voices" is described as *other fundamentals still ringing inside the
+  analysis window (including the previous strike's tail)*, not as a transcription of a chord.
+
 ## 1.2.0 — 2026-11-26
 
 - **Tempo**: onset-flux autocorrelation is now comb-scored over lag × 2/3/4, with parabolic
